@@ -1,4 +1,3 @@
-
 import os
 import subprocess
 import argparse
@@ -7,13 +6,7 @@ import cv2
 import numpy as np
 import shutil
 import re
-from PIL import Image
-
-# --- Global variables for mouse callback ---
-drawing = False
-ix, iy = -1, -1
-roi_rect = []
-picked_color = []
+from PIL import Image, ImageDraw, ImageFont
 
 def get_script_path():
     """実行中のスクリプトの絶対パスを取得します。"""
@@ -22,37 +15,87 @@ def get_script_path():
     else:
         return os.path.dirname(os.path.abspath(__file__))
 
-def draw_rectangle(event, x, y, flags, param):
-    """Mouse callback function to draw rectangle."""
-    global ix, iy, drawing, roi_rect
-    frame = param['frame'].copy()
-    if event == cv2.EVENT_LBUTTONDOWN:
-        drawing = True
-        ix, iy = x, y
-    elif event == cv2.EVENT_MOUSEMOVE:
-        if drawing:
-            cv2.rectangle(frame, (ix, iy), (x, y), (0, 255, 0), 2)
-    elif event == cv2.EVENT_LBUTTONUP:
-        drawing = False
-        cv2.rectangle(frame, (ix, iy), (x, y), (0, 255, 0), 2)
-        roi_rect = [min(ix, x), min(iy, y), abs(ix - x), abs(iy - y)]
-    cv2.imshow(param['window_name'], frame)
+def run_yt_dlp_update(yt_dlp_path):
+    """yt-dlp.exe -U を実行して自己更新を試みます。"""
+    print("--- yt-dlp の更新を確認しています... ---")
+    if not os.path.exists(yt_dlp_path):
+        print(f"エラー: {yt_dlp_path} が見つかりません。")
+        print("yt-dlp.exeをダウンロードして、このプログラムと同じフォルダに置いてください。")
+        return False
+    
+    try:
+        command = [yt_dlp_path, "-U"]
+        result = subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        
+        output = result.stdout.strip()
+        errors = result.stderr.strip()
+        if output:
+            print(output)
+        if errors:
+            print(errors)
 
-def pick_color_callback(event, x, y, flags, param):
-    """背景色を選択するためのマウスコールバック"""
-    global picked_color
-    if event == cv2.EVENT_LBUTTONDOWN:
-        scale = param.get('scale', 1.0)
-        original_frame = param['original_frame']
-        # 縮小表示された座標を元の座標に変換
-        orig_x, orig_y = int(x / scale), int(y / scale)
-        picked_color = original_frame[orig_y, orig_x].tolist()
-        print(f"背景色として {picked_color} を選択しました。")
+        print("--- 更新チェック完了 ---")
+        return True
+
+    except subprocess.CalledProcessError as e:
+        print("yt-dlpの更新中にエラーが発生しました。")
+        print(e.stdout)
+        print(e.stderr)
+        print("--- 更新チェック完了 (エラー) ---")
+        return False
+    except Exception as e:
+        print(f"予期せぬエラーが発生しました: {e}")
+        print("--- 更新チェック完了 (エラー) ---")
+        return False
+
+class ROISelector:
+    """ROI選択のためのUI状態とコールバックを管理するクラス。"""
+    def __init__(self, frame, window_name):
+        self.frame = frame
+        self.window_name = window_name
+        self.drawing = False
+        self.ix, self.iy = -1, -1
+        self.roi_rect = []
+
+    def callback(self, event, x, y, flags, param):
+        """ROI描画用のマウスコールバック。"""
+        frame_to_show = self.frame.copy()
+        
+        if self.drawing:
+            cv2.rectangle(frame_to_show, (self.ix, self.iy), (x, y), (0, 255, 0), 2)
+        elif self.roi_rect:
+            cv2.rectangle(frame_to_show, (self.roi_rect[0], self.roi_rect[1]), 
+                          (self.roi_rect[0] + self.roi_rect[2], self.roi_rect[1] + self.roi_rect[3]), 
+                          (0, 255, 0), 2)
+
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.drawing = True
+            self.ix, self.iy = x, y
+            self.roi_rect = []
+        
+        elif event == cv2.EVENT_LBUTTONUP:
+            self.drawing = False
+            cv2.rectangle(frame_to_show, (self.ix, self.iy), (x, y), (0, 255, 0), 2)
+            self.roi_rect = [min(self.ix, x), min(self.iy, y), abs(self.ix - x), abs(self.iy - y)]
+
+        cv2.imshow(self.window_name, frame_to_show)
+
+class ColorPicker:
+    """背景色選択のためのUI状態とコールバックを管理するクラス。"""
+    def __init__(self, original_frame, scale=1.0):
+        self.original_frame = original_frame
+        self.scale = scale
+        self.picked_color = []
+
+    def callback(self, event, x, y, flags, param):
+        """背景色選択用のマウスコールバック。"""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            orig_x, orig_y = int(x / self.scale), int(y / self.scale)
+            self.picked_color = self.original_frame[orig_y, orig_x].tolist()
+            print(f"背景色として {self.picked_color} を選択しました。")
 
 def select_roi_manually(video_path):
     """動画フレームをリサイズして表示し、手動でROIを選択させる。"""
-    global roi_rect
-    roi_rect = []
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"エラー: 動画ファイルを開けません: {video_path}")
@@ -78,40 +121,36 @@ def select_roi_manually(video_path):
 
     window_name = "Select Score Area: Drag mouse, then press Enter."
     cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    
+    roi_selector = ROISelector(display_frame, window_name)
+    cv2.setMouseCallback(window_name, roi_selector.callback)
     cv2.imshow(window_name, display_frame)
-    cv2.setMouseCallback(window_name, draw_rectangle, {'frame': display_frame, 'window_name': window_name})
 
     print("楽譜の範囲をマウスでドラッグし、Enterキーを押して確定してください。")
 
+    final_roi = None
     while True:
         key = cv2.waitKey(0) & 0xFF
         if key == 13:  # Enter key
-            if roi_rect and roi_rect[2] > 0 and roi_rect[3] > 0:
-                original_roi = [int(c / scale) for c in roi_rect]
-                roi_rect = original_roi
+            if roi_selector.roi_rect and roi_selector.roi_rect[2] > 0 and roi_selector.roi_rect[3] > 0:
+                final_roi = [int(c / scale) for c in roi_selector.roi_rect]
                 break
             else:
                 print("範囲が選択されていません。ドラッグして範囲を選択してください。")
         elif key == 27:  # Escape key
             print("選択がキャンセルされました。")
-            roi_rect = []
             break
 
     cap.release()
     cv2.destroyAllWindows()
-    return roi_rect
+    return final_roi
 
 def find_roi(video_path, color_tolerance=30):
-    """
-    v7: User-assisted color detection with UI fixes.
-    Returns: (roi, frame) or (None, None)
-    """
-    global picked_color
-    picked_color = []
-    print(f"楽譜エリア(ROI)を自動検出しています (v7: User-Assisted Color Detection, Tolerance: {color_tolerance})...")
+    """v8: Refactored with classes. User-assisted color detection."""
+    print(f"楽譜エリア(ROI)を自動検出しています (v8: Refactored, Tolerance: {color_tolerance})...")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print("エラー: 動画ファイルを開けません。")
+        print(f"エラー: 動画ファイルを開けません: {video_path}")
         return None, None
 
     ret, frame = cap.read()
@@ -120,7 +159,6 @@ def find_roi(video_path, color_tolerance=30):
         print("エラー: フレームを読み込めません。")
         return None, None
 
-    # ウィンドウ縮小表示ロジック
     original_height, original_width = frame.shape[:2]
     max_display_width = 1280
     scale = 1.0
@@ -133,11 +171,12 @@ def find_roi(video_path, color_tolerance=30):
         display_frame = frame
 
     window_name = "Auto ROI: Click on the sheet music background to pick a color."
+    color_picker = ColorPicker(frame, scale)
     cv2.imshow(window_name, display_frame)
-    cv2.setMouseCallback(window_name, pick_color_callback, {'frame': display_frame, 'original_frame': frame, 'scale': scale})
+    cv2.setMouseCallback(window_name, color_picker.callback)
     print("ウィンドウ上で、楽譜の背景（紙の色）をクリックしてください。Escキーでキャンセル。")
 
-    while not picked_color:
+    while not color_picker.picked_color:
         if cv2.waitKey(1) & 0xFF == 27:
             print("色選択がキャンセルされました。")
             cv2.destroyAllWindows()
@@ -145,15 +184,19 @@ def find_roi(video_path, color_tolerance=30):
             return None, None
     
     cv2.destroyAllWindows()
+    
+    picked_color = color_picker.picked_color
+    if not picked_color:
+        cap.release()
+        return None, None
 
-    # --- マスク作成と輪郭検出 ---
     color = np.array(picked_color, dtype=np.uint8)
     lower_bound = np.clip(color.astype(int) - color_tolerance, 0, 255).astype(np.uint8)
     upper_bound = np.clip(color.astype(int) + color_tolerance, 0, 255).astype(np.uint8)
 
     mask = cv2.inRange(frame, lower_bound, upper_bound)
 
-    kernel_size = int(min(original_width, original_height) * 0.05) # フレームサイズに応じたカーネル
+    kernel_size = int(min(original_width, original_height) * 0.05)
     kernel = np.ones((kernel_size, kernel_size), np.uint8)
     closed_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
@@ -177,17 +220,18 @@ def confirm_roi(frame, roi):
     if frame is None or roi is None: return False
 
     x, y, w, h = roi
-    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 3)
+    frame_copy = frame.copy()
+    cv2.rectangle(frame_copy, (x, y), (x + w, y + h), (0, 0, 255), 3)
 
-    original_height, original_width = frame.shape[:2]
+    original_height, original_width = frame_copy.shape[:2]
     max_display_width = 1280
     if original_width > max_display_width:
         scale = max_display_width / original_width
         display_width = max_display_width
         display_height = int(original_height * scale)
-        display_frame = cv2.resize(frame, (display_width, display_height))
+        display_frame = cv2.resize(frame_copy, (display_width, display_height))
     else:
-        display_frame = frame
+        display_frame = frame_copy
 
     window_name = "Confirm Auto ROI: Press Enter to accept, Esc to cancel."
     cv2.imshow(window_name, display_frame)
@@ -196,14 +240,11 @@ def confirm_roi(frame, roi):
     key = cv2.waitKey(0) & 0xFF
     cv2.destroyAllWindows()
 
-    return key == 13 # Enterキーが押された場合のみTrue
+    return key == 13
 
-def download_video(video_url, download_dir="video_downloads"):
-    """
-    yt-dlp.exeを使用して最高品質の動画をダウンロードします。
-    """
+def download_video(video_url, yt_dlp_path, download_dir="video_downloads"):
+    """yt-dlp.exeを使用して最高品質の動画をダウンロードします。"""
     script_dir = get_script_path()
-    yt_dlp_path = os.path.join(script_dir, "yt-dlp.exe")
     full_download_dir = os.path.join(script_dir, download_dir)
     preferred_encoding = 'cp932' if sys.platform == 'win32' else 'utf-8'
 
@@ -214,7 +255,7 @@ def download_video(video_url, download_dir="video_downloads"):
     try:
         print("動画のタイトルを取得しています...")
         title_command = [yt_dlp_path, "--get-title", "--skip-download", video_url]
-        title_result = subprocess.run(title_command, check=True, capture_output=True, text=True, encoding=preferred_encoding)
+        title_result = subprocess.run(title_command, check=True, capture_output=True, text=True, encoding=preferred_encoding, errors='ignore')
         video_title = title_result.stdout.strip()
         
         sanitized_title = re.sub(r'[\\/*?"<>|]', '_', video_title)
@@ -226,7 +267,7 @@ def download_video(video_url, download_dir="video_downloads"):
         if os.path.exists(output_path):
             print(f"動画は既に存在します: {output_path}")
             print("ダウンロードをスキップします。")
-            return output_path, sanitized_title
+            return output_path, video_title
 
         print(f"動画をダウンロードしています: {video_title}")
         download_format = "bestvideo+bestaudio/best"
@@ -236,23 +277,21 @@ def download_video(video_url, download_dir="video_downloads"):
             "-o", output_path,
             video_url
         ]
-        subprocess.run(download_command, check=True, capture_output=True, text=True, encoding=preferred_encoding)
+        subprocess.run(download_command, check=True, encoding=preferred_encoding, errors='ignore')
         print("動画のダウンロードが完了しました。")
         print(f"保存先: {output_path}")
-        return output_path, sanitized_title
+        return output_path, video_title
 
     except subprocess.CalledProcessError as e:
         print("yt-dlpの実行中にエラーが発生しました。")
-        print(f"エラー詳細: {e.stderr}")
+        print(f"コマンド '{' '.join(e.cmd)}' は終了コード {e.returncode} で失敗しました。")
         return None, None
     except Exception as e:
         print(f"予期せぬエラーが発生しました: {e}")
         return None, None
 
 def extract_unique_frames(video_path, roi, skip_seconds=1.5, output_dir="output_frames", threshold=2.0):
-    """
-    ROI内の変化を監視し、ユニークなフレームを画像として保存する。
-    """
+    """ROI内の変化を監視し、ユニークなフレームを画像として保存する。"""
     print(f"ユニークなフレームを抽出しています... (約{skip_seconds}秒ごとにチェック)")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -305,10 +344,8 @@ def extract_unique_frames(video_path, roi, skip_seconds=1.5, output_dir="output_
     print(f"抽出完了。合計 {saved_count} 枚のユニークな画像を保存しました。")
     return output_dir
 
-def create_pdf_from_images(image_folder, pdf_path):
-    """
-    A4用紙にマージンを設定し、複数の画像を縦に並べてPDFを作成する。
-    """
+def create_pdf_from_images(image_folder, pdf_path, title=""):
+    """A4用紙にタイトルを描画し、複数の画像を縦に並べてPDFを作成する。"""
     print(f"楽譜形式のPDFを作成しています: {pdf_path}")
     image_files = sorted([os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.endswith('.png')])
 
@@ -324,6 +361,32 @@ def create_pdf_from_images(image_folder, pdf_path):
     pages = []
     current_page = Image.new('RGB', (A4_WIDTH_PX, A4_HEIGHT_PX), 'white')
     y_offset = MARGIN_PX
+
+    if title:
+        draw = ImageDraw.Draw(current_page)
+        font_size = 80
+        font_name = "meiryo.ttc" if sys.platform == "win32" else "Hiragino Sans GB.ttc"
+        
+        try:
+            font = ImageFont.truetype(font_name, size=font_size)
+        except IOError:
+            print(f"警告: フォント '{font_name}' が見つかりません。代替フォントで描画します。")
+            try:
+                font = ImageFont.truetype("arial.ttf", size=font_size)
+            except IOError:
+                print("警告: 'arial.ttf' も見つかりません。デフォルトフォントを使用します。")
+                font = ImageFont.load_default()
+
+        try:
+            bbox = draw.textbbox((0, 0), title, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        except AttributeError:
+            text_width, text_height = draw.textsize(title, font=font)
+
+        x_pos = (A4_WIDTH_PX - text_width) / 2
+        draw.text((x_pos, y_offset), title, fill="black", font=font)
+        y_offset += text_height + GAP_PX * 2
 
     for img_file in image_files:
         img = Image.open(img_file)
@@ -350,15 +413,23 @@ def create_pdf_from_images(image_folder, pdf_path):
     print("PDFの作成が完了しました。")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="楽譜動画をダウンロードしてPDFに変換するツール v2")
+    parser = argparse.ArgumentParser(description="楽譜動画をダウンロードしてPDFに変換するツール v4 (タイトル機能付き)")
     parser.add_argument("url", help="ダウンロードする動画のURL")
-    parser.add_argument("--skip_seconds", type=float, default=1.5, help="フレームをチェックする間隔（秒）。値を大きくすると速くなりますが、変化を見逃す可能性があります。")
+    parser.add_argument("--skip_seconds", type=float, default=1.5, help="フレームをチェックする間隔（秒）。")
     parser.add_argument("--auto_roi", action='store_true', help="ROI（楽譜エリア）の自動検出を試みます。")
     parser.add_argument("--color_tolerance", type=int, default=30, help="背景色検出の色の許容範囲。")
+    parser.add_argument("--skip-update", action='store_true', help="起動時のyt-dlp自動更新をスキップします。")
 
     args = parser.parse_args()
     
-    downloaded_file, video_title = download_video(args.url)
+    script_dir = get_script_path()
+    yt_dlp_path = os.path.join(script_dir, "yt-dlp.exe")
+
+    if not args.skip_update:
+        if not run_yt_dlp_update(yt_dlp_path):
+            print("\n警告: yt-dlpの更新に失敗しました。現在のバージョンで処理を続行します。")
+    
+    downloaded_file, video_title = download_video(args.url, yt_dlp_path)
     
     if downloaded_file:
         roi = None
@@ -369,8 +440,9 @@ if __name__ == "__main__":
                     roi = potential_roi
                 else:
                     print("自動検出ROIがキャンセルされました。")
-            else:
-                print("\n自動検出に失敗したため、手動選択に切り替えます。")
+            
+            if not roi:
+                print("\n自動検出に失敗したか、キャンセルされました。手動選択に切り替えます。")
                 roi = select_roi_manually(downloaded_file)
         else:
             roi = select_roi_manually(downloaded_file)
@@ -381,7 +453,7 @@ if __name__ == "__main__":
             if frame_folder and os.listdir(frame_folder):
                 print(f"\nフレームは '{frame_folder}' フォルダに保存されました。")
                 pdf_output_path = os.path.join(get_script_path(), f"{video_title}.pdf")
-                create_pdf_from_images(frame_folder, pdf_output_path)
+                create_pdf_from_images(frame_folder, pdf_output_path, title=video_title)
             else:
                 print("ユニークなフレームが見つからなかったため、PDFは作成されませんでした。")
         else:
